@@ -1,0 +1,144 @@
+name: Phase 1 - Verify Build Dependencies
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  verify-deps:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # 1. 检出源码
+      # ==========================================
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ==========================================
+      # 2. 安装基础环境
+      # ==========================================
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Android SDK / NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;27.0.12077973
+            cmake;3.22.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ==========================================
+      # 3. 拉取 uWebSockets（带官方配套 uSockets submodule）
+      # ==========================================
+      - name: Clone uWebSockets with uSockets submodule
+        run: |
+          cd android/app/src/main/cpp/third_party
+          git clone --depth 1 --branch v20.44.0 \
+            https://github.com/uNetworking/uWebSockets.git
+          cd uWebSockets
+          git submodule update --init --recursive
+
+          # 把配套 uSockets 复制到 MikuPlay 要求的位置
+          cp -r uSockets ../uSockets
+
+          # 记录基线版本
+          echo "=== Build Baseline ==="
+          echo "uWebSockets: $(git rev-parse HEAD)"
+          echo "uSockets:    $(cd uSockets && git rev-parse HEAD)"
+
+      # ==========================================
+      # 4. 拉取并编译 libvpx（Android arm64）
+      # ==========================================
+      - name: Clone libvpx
+        run: |
+          cd android/app/src/main/cpp/third_party
+          git clone --depth 1 --branch v1.14.0 \
+            https://chromium.googlesource.com/webm/libvpx
+          cd libvpx
+          echo "libvpx: $(git rev-parse HEAD)"
+
+      - name: Configure and build libvpx for arm64
+        run: |
+          export NDK=$ANDROID_HOME/ndk/27.0.12077973
+          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+
+          # 核心编译器（CC/CXX/AR/RANLIB 是必须的）
+          export CC=$TOOLCHAIN/bin/aarch64-linux-android24-clang
+          export CXX=$TOOLCHAIN/bin/aarch64-linux-android24-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+
+          cd android/app/src/main/cpp/third_party/libvpx
+
+          # 配置
+          ./configure \
+            --target=arm64-android-gcc \
+            --prefix=./build-android-arm64 \
+            --enable-static \
+            --disable-shared \
+            --disable-examples \
+            --disable-docs \
+            --disable-unit-tests \
+            --enable-vp8 \
+            --enable-vp9 \
+            --enable-neon \
+            --enable-optimizations
+
+          # 编译安装
+          make -j$(nproc)
+          make install
+
+      # ==========================================
+      # 5. 验证目录结构
+      # ==========================================
+      - name: Verify all dependencies
+        run: |
+          set -e
+          BASE=android/app/src/main/cpp/third_party
+
+          echo "=== 1. uSockets 源文件 ==="
+          ls $BASE/uSockets/src/bsd.c
+          ls $BASE/uSockets/src/context.c
+          ls $BASE/uSockets/src/loop.c
+          ls $BASE/uSockets/src/socket.c
+          ls $BASE/uSockets/src/udp.c
+          ls $BASE/uSockets/src/eventing/epoll_kqueue.c
+          echo "✅ uSockets 源文件齐全"
+
+          echo "=== 2. uWebSockets 头文件 ==="
+          ls $BASE/uWebSockets/src/App.h
+          echo "✅ uWebSockets 头文件存在"
+
+          echo "=== 3. libvpx 预编译库 ==="
+          ls -lh $BASE/libvpx/build-android-arm64/lib/libvpx.a
+          file $BASE/libvpx/build-android-arm64/lib/libvpx.a
+          echo "✅ libvpx.a 已生成"
+
+          echo "=== 4. libwebm 源文件（libvpx 自带） ==="
+          ls $BASE/libvpx/third_party/libwebm/mkvmuxer/mkvmuxer.cc
+          ls $BASE/libvpx/third_party/libwebm/mkvmuxer/mkvmuxerutil.cc
+          ls $BASE/libvpx/third_party/libwebm/mkvmuxer/mkvwriter.cc
+          echo "✅ libwebm 源文件存在"
+
+          echo "=== 5. 已有第三方库确认 ==="
+          ls -d $BASE/curl
+          ls -d $BASE/mbedtls
+          ls -d $BASE/picosha256
+          echo "✅ 原有第三方库完整"
+
+          echo ""
+          echo "=========================================="
+          echo "✅ Phase 1 全部依赖验证通过！"
+          echo "=========================================="
